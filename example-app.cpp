@@ -1,7 +1,8 @@
 #include <torch/torch.h>
 #include <iostream>
 #include <string>
-#include <map>
+#include <vector>
+
 struct Net : torch::nn::Module {
     Net(int N, int M):W(register_module("W", torch::nn::Linear(N, M))) {}
     
@@ -24,12 +25,11 @@ struct DLGN : torch::nn::Module {
     this->num_layers = num_layers;
     this->beta = beta;
     this->mode = "pwc";
-
     torch::nn::Linear input_gating_layer = torch::nn::Linear(input_dim, hidden_nodes[0]);
     torch::nn::Linear input_value_layer = torch::nn::Linear(input_dim, hidden_nodes[0]);
     gating_layers->push_back(input_gating_layer);
     value_layers->push_back(input_value_layer);
-    for(int i=0; i< num_layers; i++){
+    for(int i=0; i< num_layers - 1; i++){
       auto gl = torch::nn::Linear(hidden_nodes[i], hidden_nodes[i+1]);
       auto vl = torch::nn::Linear(hidden_nodes[i], hidden_nodes[i+1]);
       gating_layers->push_back(gl);
@@ -55,8 +55,32 @@ struct DLGN : torch::nn::Module {
   //   }
   // }
 
-  void forward(torch::Tensor x){
-    
+  std::pair<std::vector<torch::Tensor>, std::vector<torch::Tensor>> forward(torch::Tensor x){
+    torch::Device device(torch::kCPU);
+
+    for (const auto &el: this->parameters()) {
+      if(el.is_cuda()) {
+        device = torch::kCUDA;
+      }
+      else {
+        device = torch::kCPU;
+      }
+    }
+    auto values = std::vector<torch::Tensor>(1, torch::ones(x.sizes()).to(device));
+    auto gate_scores = std::vector<torch::Tensor>(1, x);
+    for(int i=0; i<this->num_layers; i++) {
+      // std::cout<<"wchi iteration " << i <<std::endl;
+      // std::cout<<"does this work " << gating_layers[i]->as<torch::nn::Linear>() << std::endl;
+      // std::cout<< gate_scores.back() << std::endl;
+      // std::cout<<"does this work " << gating_layers[i]->as<torch::nn::Linear>() -> forward(x) << std::endl;
+      gate_scores.push_back(gating_layers[i]->as<torch::nn::Linear>()->forward(gate_scores.back()));
+      // std::cout << gate_scores.back() <<std::endl;
+      torch::Tensor curr_gate_on_off = torch::sigmoid(beta* gate_scores.back());
+      values.push_back(value_layers[i]->as<torch::nn::Linear>()->forward(values.back()) * curr_gate_on_off);
+    }
+    values.push_back(value_layers[num_layers]->as<torch::nn::Linear>()->forward(values.back()));
+
+    return {values, gate_scores};
   }
 };
 
@@ -67,4 +91,13 @@ int main() {
   torch::Tensor input = torch::rand({5}, device);
   std::cout << input << std::endl;
   std::cout << net.forward(input) << std::endl;
+
+
+  //DLGN test
+  int layers[3] = {5, 5, 5};
+  DLGN dlgn(5, 2, layers, 3, 5);
+  dlgn.to(device);
+  // input = torch::randn({5})
+  std::cout << "Reached dlgn time??" << std::endl;
+  std::cout << dlgn.forward(input) << std::endl;
 }
