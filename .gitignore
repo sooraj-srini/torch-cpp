@@ -2,3 +2,6 @@ libtorch/
 libtorch*
 *.html
 build/
+dist/
+*.pt
+dlgn_train*

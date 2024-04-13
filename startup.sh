@@ -1,4 +1,4 @@
-sudo apt install nvtop unzip htop
+sudo apt install nvtop unzip htop python3-dev
 if [ ! -d "libtorch" ]; then
 wget https://download.pytorch.org/libtorch/nightly/cu121/libtorch-cxx11-abi-shared-with-deps-latest.zip
 unzip libtorch-cxx11-abi-shared-with-deps-latest.zip
