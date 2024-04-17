@@ -4,6 +4,8 @@
 #include <string>
 #include <vector>
 
+using namespace torch::indexing;
+
 struct Net : torch::nn::Module
 {
   Net(int N, int M) : W(register_module("W", torch::nn::Linear(N, M))) {}
@@ -93,17 +95,22 @@ struct DLGNImpl : torch::nn::Module
     }
     auto values = std::vector<torch::Tensor>(1, torch::ones(x.sizes()).to(device));
     auto gate_scores = std::vector<torch::Tensor>(1, x);
+    auto gate_old = x;
+    auto value_old = torch::ones(x.sizes()).to(device);
     for (int i = 0; i < this->num_layers; i++)
     {
-      if (debug)
-        std::cout << "is it here ??? " << i << std::endl;
-      gate_scores.push_back(gating_layers[i]->as<torch::nn::Linear>()->forward(gate_scores.back()));
-      torch::Tensor curr_gate_on_off = torch::sigmoid(beta * gate_scores.back());
-      values.push_back(value_layers[i]->as<torch::nn::Linear>()->forward(values.back()) * curr_gate_on_off);
+      // gate_scores.push_back(gating_layers[i]->as<torch::nn::Linear>()->forward(gate_scores.back()));
+      gate_old = (gating_layers[i]->as<torch::nn::Linear>()->forward(gate_old));
+      // torch::Tensor curr_gate_on_off = torch::sigmoid(beta * gate_scores.back());
+      torch::Tensor curr_gate_on_off = torch::sigmoid(beta * gate_old);
+      // values.push_back(value_layers[i]->as<torch::nn::Linear>()->forward(values.back()) * curr_gate_on_off);
+      value_old = (value_layers[i]->as<torch::nn::Linear>()->forward(value_old) * curr_gate_on_off);
     }
-    values.push_back(value_layers[num_layers]->as<torch::nn::Linear>()->forward(values.back()));
+    // values.push_back(value_layers[num_layers]->as<torch::nn::Linear>()->forward(values.back()));
+    value_old = (value_layers[num_layers]->as<torch::nn::Linear>()->forward(value_old));
 
-    return {values, gate_scores};
+    // return {values, gate_scores};
+    return {{value_old}, {gate_old}};
   }
 };
 
@@ -111,11 +118,7 @@ TORCH_MODULE(DLGN);
 
 DLGN trainDLGN(DLGN dlgn_obj, torch::Tensor train_tensor, torch::Tensor train_labels_tensor, int num_epochs)
 {
-  if (debug)
-    std::cout << "training began" << std::endl;
   auto device = torch::cuda::is_available() ? torch::Device(torch::kCUDA) : torch::Device(torch::kCPU);
-  if (debug)
-    std::cout << "Device chosen " << device << std::endl;
   dlgn_obj->to(device);
 
   // auto train_tensor = torch::tensor(train_data, device);
@@ -132,43 +135,36 @@ DLGN trainDLGN(DLGN dlgn_obj, torch::Tensor train_tensor, torch::Tensor train_la
   int batch_size = num_data / num_batches;
   for (int epoch = 1; epoch <= num_epochs; epoch++)
   {
-    std::cout << "Starting epoch " << epoch << std::endl;
+    std::cout << "Starting epoch " << epoch << "\n";
     for (int batch_num = 0; batch_num < num_data; batch_num += batch_size)
     {
       if (batch_num + batch_size > num_data)
         break;
-      if (debug)
-        std::cout << "In the batch " << batch_num << " till " << batch_num + batch_size << std::endl;
-      auto batch_data = train_tensor.index({torch::indexing::Slice(batch_num, batch_num + batch_size)}).to(device);
-      auto batch_labels = train_labels_tensor.index({torch::indexing::Slice(batch_num, batch_num + batch_size)}).reshape(batch_size).to(device);
-      if (debug)
-        std::cout << "Batch data size " << batch_data.size(0) << " " << batch_data.size(1) << std::endl;
-      if (debug)
-        std::cout << "Created the batches on device " << batch_data.device() << std::endl;
+      auto batch_data = train_tensor.index({torch::indexing::Slice(batch_num, batch_num + batch_size)});
+      auto batch_labels = train_labels_tensor.index({torch::indexing::Slice(batch_num, batch_num + batch_size)}).reshape(batch_size);
       auto pair = dlgn_obj->forward(batch_data);
-      if (debug)
-        std::cout << "Forward process done now " << std::endl;
       auto values = pair.first;
-      if (debug)
-        std::cout << "what does value look like?" << values.back() << std::endl;
       auto outputs = torch::cat({-1 * values.back(), values.back()}, 1);
-      if (debug)
-        std::cout << "Outputs have been created thank god " << std::endl;
-      if (debug)
-        std::cout << "Analyzing outputs: " << outputs.size(0) << " " << batch_labels.size(0) << std::endl;
-      if (debug)
-        std::cout << " Output is " << outputs << std::endl
-                  << "Train_data is " << batch_labels << std::endl;
-      if (debug)
-        std::cout << "Output is in this device btw " << outputs.device() << std::endl;
       optimizer.zero_grad();
       auto loss = criterion(outputs, batch_labels);
-      std::cout << "Current loss: " << loss << std::endl;
       loss.backward();
       optimizer.step();
     }
   }
   return dlgn_obj;
+}
+
+
+//works only when the tensors are on the same device
+torch::Tensor inference(DLGN dlgn_obj, torch::Tensor features, torch::Device device) {
+  features = features.to(device);
+  auto pair = dlgn_obj->forward(features);
+  auto values = pair.first;
+  auto preds = values.back();
+  auto prediction = torch::sign(preds.index({torch::indexing::Slice(torch::indexing::None, torch::indexing::None), 0}));
+  prediction = torch::add(prediction, 1);
+  prediction = torch::floor(torch::div(prediction, 2));
+  return prediction;
 }
 
 int main()
@@ -183,20 +179,38 @@ int main()
   // DLGN test
 
   // train the dlgn with some random data just to see how it does
-  std::vector<char> f = get_the_bytes("covertype_features.pt");
-  std::cout << "here" << std::endl;
+  std::vector<char> f = get_the_bytes("/root/sem/torch-cpp/electricity_features.pt");
   torch::IValue x = torch::pickle_load(f);
-  torch::Tensor train_data = x.toTensor().to(torch::kFloat32);
-  f = get_the_bytes("covertype_labels.pt");
+  torch::Tensor data = x.toTensor().to(torch::kFloat32);
+  f = get_the_bytes("/root/sem/torch-cpp/electricity_labels.pt");
   x = torch::pickle_load(f);
-  torch::Tensor train_labels = x.toTensor();
-  std::cout << "Size of tensor" << train_data.size(0) << "  " << train_data.size(1) << "\n";
+  torch::Tensor labels = x.toTensor();
+  labels = labels.to(torch::kInt64);
+  int num_data = data.size(0);
+
+  //Split the data into train validation and test
+  auto train_data = data.index({Slice(None, int(0.7 * num_data))});
+  auto train_labels = labels.index({Slice(None, int(0.7 * num_data))});
+  auto valid_data = data.index({Slice(int(0.7 * num_data), int(0.79 * num_data))});
+  auto valid_labels= labels.index({Slice(int(0.7 * num_data), int(0.79 * num_data))});
+  auto test_data = data.index({Slice(int(0.79 * num_data), None)});
+  auto test_labels = labels.index({Slice(int(0.79 * num_data), None)});
 
   int layers[3] = {50, 50, 50};
-  DLGN dlgn(10, 1, layers, 3, 5);
+  DLGN dlgn(data.size(1), 1, layers, 3, 5);
   dlgn->to(device);
-  input = torch::randn({2, 10}, device);
-  std::cout << "Reached dlgn time??" << std::endl;
-  std::cout << dlgn->forward(input) << std::endl;
-  trainDLGN(dlgn, train_data, train_labels, 2000);
+  trainDLGN(dlgn, train_data, train_labels, 2048);
+
+  auto train_preds = inference(dlgn, train_data, device).to(torch::kInt64).to(torch::kCPU);
+  int train_correct = torch::sum(torch::eq(train_labels, train_preds)).item<int>();
+  float train_accuracy = train_correct / (1.0 * train_labels.size(0));
+  std::cout << "Out of " << train_labels.size(0) << " train data, the model has gotten " << train_correct << " correct. " <<std::endl;
+  std::cout << "Train Data Percentage Accuracy is " << train_accuracy * 100 << std::endl;
+  
+  
+  auto test_preds = inference(dlgn, test_data, device).to(torch::kInt64).to(torch::kCPU);
+  int test_correct = torch::sum(torch::eq(test_labels, test_preds)).item<int>();
+  float test_accuracy = test_correct / (1.0 * test_labels.size(0));
+  std::cout << "Out of " << test_labels.size(0) << " test data, the model has gotten " << test_correct << " correct. " <<std::endl;
+  std::cout << "Test Data Percentage Accuracy is " << test_accuracy * 100 << std::endl;
 }
